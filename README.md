@@ -42,6 +42,16 @@ ditto dist/ImmersiveTranslator.app /Applications/ImmersiveTranslator.app
 open /Applications/ImmersiveTranslator.app
 ```
 
+## Download
+
+可以从 GitHub Releases 下载预构建版本：
+
+```text
+https://github.com/kobejiasuoer/immersive-translator-macos/releases
+```
+
+当前 release 包仍是开发构建，尚未使用 Apple Developer ID 正式签名和公证。macOS 可能会提示“无法验证开发者”，需要在“系统设置 -> 隐私与安全性”里手动允许打开。更推荐开发者从源码构建运行。
+
 ## Setup
 
 首次使用需要在菜单栏点击 `译`：
@@ -94,6 +104,31 @@ CODESIGN_IDENTITY="ImmersiveTranslator Local Dev" ./scripts/build_app.sh
 ```
 
 如果 `codesign` 卡住，通常是钥匙串私钥访问需要授权。可以在“钥匙串访问”里找到对应证书的私钥，允许 `codesign` 访问。
+
+### Release Packaging
+
+生成 release zip 和 sha256：
+
+```bash
+./scripts/package_release.sh 0.1.0
+```
+
+如果你有 Apple Developer ID 证书，可以先用正式证书构建：
+
+```bash
+CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./scripts/package_release.sh 0.1.0
+```
+
+公证需要先在 Keychain 里配置 notarytool credentials：
+
+```bash
+xcrun notarytool store-credentials immersive-translator-notary
+xcrun notarytool submit release/ImmersiveTranslator-0.1.0-macOS.zip \
+  --keychain-profile immersive-translator-notary \
+  --wait
+```
+
+公证通过后再发布到 GitHub Releases。
 
 ## Architecture
 
