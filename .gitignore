@@ -1,0 +1,25 @@
+.build/
+.swiftpm/
+DerivedData/
+dist/
+*.xcuserstate
+.DS_Store
+
+# Xcode / SwiftPM local state
+Package.resolved
+xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+
+# macOS artifacts
+*.app
+*.dSYM
+
+# Local secrets and diagnostics
+.env
+.env.*
+*.log
+diagnostic.log
+
+# Temporary files
+*.tmp
+*.swp
