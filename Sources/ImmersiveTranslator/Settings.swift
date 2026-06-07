@@ -170,8 +170,9 @@ final class SettingsWindowController: NSWindowController {
         let hosting = NSHostingController(rootView: view)
         let window = NSWindow(contentViewController: hosting)
         window.title = "沉浸式翻译设置"
-        window.styleMask = [.titled, .closable, .miniaturizable]
-        window.setContentSize(NSSize(width: 560, height: 620))
+        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+        window.setContentSize(NSSize(width: 600, height: 680))
+        window.minSize = NSSize(width: 520, height: 440)
         window.isReleasedWhenClosed = false
         super.init(window: window)
     }
@@ -191,83 +192,77 @@ struct SettingsView: View {
     @ObservedObject var settingsStore: SettingsStore
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("沉浸式翻译设置")
-                    .font(.title2.weight(.semibold))
-                Spacer()
-                Text(currentProviderHint)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            VStack(alignment: .leading, spacing: 10) {
-                sectionTitle("翻译服务")
-                labeledField("API Key", text: $settingsStore.apiKey, secure: true)
-                labeledField("接口地址", text: $settingsStore.endpoint)
-                labeledField("模型", text: $settingsStore.model)
-                labeledField("目标语言", text: $settingsStore.targetLanguage)
-                Toggle("流式显示译文", isOn: $settingsStore.enableStreamingTranslation)
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text("常用配置")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                HStack(spacing: 8) {
-                    presetButton("DeepSeek 快速", endpoint: "https://api.deepseek.com/chat/completions", model: "deepseek-chat")
-                    presetButton("DeepSeek V4 Flash", endpoint: "https://api.deepseek.com/chat/completions", model: "deepseek-v4-flash")
-                    presetButton("OpenAI Mini", endpoint: "https://api.openai.com/v1/chat/completions", model: "gpt-4o-mini")
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 10) {
-                sectionTitle("截图 OCR")
-                Picker("识别模式", selection: $settingsStore.ocrMode) {
-                    ForEach(OCRRecognitionMode.allCases) { mode in
-                        Text(mode.title).tag(mode)
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text("沉浸式翻译设置")
+                            .font(.title2.weight(.semibold))
+                        Spacer()
+                        Text(currentProviderHint)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
-                }
-                .pickerStyle(.segmented)
 
-                Picker("识别语言", selection: $settingsStore.ocrLanguagePreset) {
-                    ForEach(OCRLanguagePreset.allCases) { preset in
-                        Text(preset.title).tag(preset)
+                    settingsSection("翻译服务") {
+                        labeledField("API Key", text: $settingsStore.apiKey, secure: true)
+                        labeledField("接口地址", text: $settingsStore.endpoint)
+                        labeledField("模型", text: $settingsStore.model)
+                        labeledField("目标语言", text: $settingsStore.targetLanguage)
+                        Toggle("流式显示译文", isOn: $settingsStore.enableStreamingTranslation)
                     }
-                }
-                .pickerStyle(.segmented)
 
-                Text("语言越少通常越快、误识别越少；混合适合临时看不准语言的截图。")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    settingsSection("常用配置") {
+                        HStack(spacing: 8) {
+                            presetButton("DeepSeek 快速", endpoint: "https://api.deepseek.com/chat/completions", model: "deepseek-chat")
+                            presetButton("DeepSeek V4 Flash", endpoint: "https://api.deepseek.com/chat/completions", model: "deepseek-v4-flash")
+                            presetButton("OpenAI Mini", endpoint: "https://api.openai.com/v1/chat/completions", model: "gpt-4o-mini")
+                        }
+                    }
+
+                    settingsSection("截图 OCR") {
+                        Picker("识别模式", selection: $settingsStore.ocrMode) {
+                            ForEach(OCRRecognitionMode.allCases) { mode in
+                                Text(mode.title).tag(mode)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+
+                        Picker("识别语言", selection: $settingsStore.ocrLanguagePreset) {
+                            ForEach(OCRLanguagePreset.allCases) { preset in
+                                Text(preset.title).tag(preset)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+
+                        Text("语言越少通常越快、误识别越少；混合适合临时看不准语言的截图。")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    settingsSection("快捷键") {
+                        Picker("选中文本翻译", selection: $settingsStore.selectionHotKeyPreset) {
+                            ForEach(SelectionHotKeyPreset.allCases) { preset in
+                                Text(preset.title).tag(preset)
+                            }
+                        }
+                        .pickerStyle(.menu)
+
+                        Picker("截图 OCR 翻译", selection: $settingsStore.ocrHotKeyPreset) {
+                            ForEach(OCRHotKeyPreset.allCases) { preset in
+                                Text(preset.title).tag(preset)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                    }
+
+                    storageMessage
+                }
+                .padding(24)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
 
-            VStack(alignment: .leading, spacing: 10) {
-                sectionTitle("快捷键")
-                Picker("选中文本翻译", selection: $settingsStore.selectionHotKeyPreset) {
-                    ForEach(SelectionHotKeyPreset.allCases) { preset in
-                        Text(preset.title).tag(preset)
-                    }
-                }
-                .pickerStyle(.menu)
-
-                Picker("截图 OCR 翻译", selection: $settingsStore.ocrHotKeyPreset) {
-                    ForEach(OCRHotKeyPreset.allCases) { preset in
-                        Text(preset.title).tag(preset)
-                    }
-                }
-                .pickerStyle(.menu)
-            }
-
-            if let apiKeyStorageError = settingsStore.apiKeyStorageError {
-                Text("API Key 未能写入 Keychain：\(apiKeyStorageError)")
-                    .font(.footnote)
-                    .foregroundStyle(.red)
-            } else {
-                Text("API Key 会保存到 macOS Keychain，其它设置保存在本机。")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
+            Divider()
 
             HStack {
                 Button("打开辅助功能设置") {
@@ -278,15 +273,35 @@ struct SettingsView: View {
                 }
                 Spacer()
             }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 14)
+            .background(.regularMaterial)
         }
-        .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
-    private func sectionTitle(_ title: String) -> some View {
-        Text(title)
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(.secondary)
+    private func settingsSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var storageMessage: some View {
+        Group {
+            if let apiKeyStorageError = settingsStore.apiKeyStorageError {
+                Text("API Key 未能写入 Keychain：\(apiKeyStorageError)")
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+            } else {
+                Text("API Key 会保存到 macOS Keychain，其它设置保存在本机。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 
     private func labeledField(_ title: String, text: Binding<String>, secure: Bool = false) -> some View {
