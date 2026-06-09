@@ -34,6 +34,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         },
         onShowHistory: { [weak self] in
             self?.historyController.show()
+        },
+        onOCRConfirm: { [weak self] text in
+            Task { @MainActor in
+                await self?.confirmOCRPreview(text)
+            }
+        },
+        onOCRReselect: { [weak self] in
+            self?.startScreenSelection()
         }
     )
     private lazy var settingsController = SettingsWindowController(settingsStore: settingsStore)
@@ -43,6 +51,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     private var hotKeyManager: HotKeyManager?
     private var screenSelector: ScreenSelectionController?
+    private var ocrSessionCounter = 0
+    private var activeOCRSessionID = 0
+    private var pendingOCRPreview: PendingOCRPreview?
     private var statusItem: NSStatusItem?
     private var cancellables: Set<AnyCancellable> = []
 
@@ -223,20 +234,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        let sessionID = beginOCRSession()
+        pendingOCRPreview = nil
         screenSelector = ScreenSelectionController { [weak self] image in
             Task { @MainActor in
-                await self?.translateImage(image)
-                self?.screenSelector = nil
+                guard let self, self.isCurrentOCRSession(sessionID) else { return }
+                self.screenSelector = nil
+                await self.recognizeImageForPreview(image, sessionID: sessionID)
             }
         } onCancel: { [weak self] reason in
-            self?.showScreenSelectionCancel(reason)
-            self?.screenSelector = nil
+            guard let self, self.isCurrentOCRSession(sessionID) else { return }
+            self.pendingOCRPreview = nil
+            self.showScreenSelectionCancel(reason)
+            self.screenSelector = nil
         }
         screenSelector?.begin()
     }
 
     @MainActor
-    private func translateImage(_ image: CGImage) async {
+    private func recognizeImageForPreview(_ image: CGImage, sessionID: Int) async {
         let startedAt = Date()
         let pixelSize = "\(image.width) x \(image.height) px"
         panelController.show(
@@ -253,31 +269,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 mode: settingsStore.ocrMode,
                 languagePreset: settingsStore.ocrLanguagePreset
             )
-            DiagnosticLogger.log("ocr.recognition.complete mode=\(settingsStore.ocrMode.rawValue) languages=\(settingsStore.ocrLanguagePreset.rawValue) image=\(pixelSize) textLength=\(text.count)")
-            guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                panelController.show(
-                    original: "截图区域：\(pixelSize)",
-                    translation: "没有识别到可翻译文字。建议把内容放大后再框选，只框文字主体；如果是英文/中文截图，可以在设置里把 OCR 语言改成“英文”或“中英”。",
-                    isLoading: false,
-                    source: .screenshotOCR,
-                    status: .warning,
-                    message: "OCR 没有识别到文字",
-                    elapsed: Date().timeIntervalSince(startedAt)
-                )
-                return
-            }
+            let elapsed = Date().timeIntervalSince(startedAt)
+            guard isCurrentOCRSession(sessionID) else { return }
 
-            panelController.show(
+            DiagnosticLogger.log("ocr.recognition.complete session=\(sessionID) mode=\(settingsStore.ocrMode.rawValue) languages=\(settingsStore.ocrLanguagePreset.rawValue) image=\(pixelSize) textLength=\(text.count)")
+            pendingOCRPreview = PendingOCRPreview(sessionID: sessionID, preflightElapsed: elapsed)
+            panelController.showOCRPreview(
                 original: text,
-                translation: "已识别 \(text.count) 个字符，正在翻译。若原文识别不准，可以在设置里切换 OCR 语言或模式。",
-                isLoading: true,
-                source: .screenshotOCR,
-                status: .loading,
-                message: "OCR 完成，正在翻译",
-                elapsed: Date().timeIntervalSince(startedAt)
+                imageDescription: pixelSize,
+                elapsed: elapsed
             )
-            await translateText(text, source: .screenshotOCR, preflightElapsed: Date().timeIntervalSince(startedAt))
         } catch {
+            guard isCurrentOCRSession(sessionID) else { return }
+            pendingOCRPreview = nil
             panelController.show(
                 original: "OCR 或翻译失败",
                 translation: ErrorMessageFormatter.message(for: error),
@@ -288,6 +292,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 elapsed: Date().timeIntervalSince(startedAt)
             )
         }
+    }
+
+    @MainActor
+    private func confirmOCRPreview(_ text: String) async {
+        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedText.isEmpty else { return }
+        guard let preview = pendingOCRPreview, isCurrentOCRSession(preview.sessionID) else {
+            panelController.show(
+                original: "OCR 预览已过期",
+                translation: "这次识别状态已经被新的框选替换。请重新框选后再确认翻译。",
+                isLoading: false,
+                source: .screenshotOCR,
+                status: .warning,
+                message: "请重新框选"
+            )
+            return
+        }
+
+        pendingOCRPreview = nil
+        await translateText(trimmedText, source: .screenshotOCR, preflightElapsed: preview.preflightElapsed)
     }
 
     @MainActor
@@ -429,6 +453,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         String(format: "%.1fs", seconds)
     }
 
+    private func beginOCRSession() -> Int {
+        ocrSessionCounter += 1
+        activeOCRSessionID = ocrSessionCounter
+        return activeOCRSessionID
+    }
+
+    private func isCurrentOCRSession(_ sessionID: Int) -> Bool {
+        sessionID == activeOCRSessionID
+    }
+
     private func resolvedTargetLanguage(for text: String) -> String {
         switch settingsStore.translationDirection {
         case .fixedTarget:
@@ -461,4 +495,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard chineseCount > 0 else { return false }
         return chineseCount >= 4 || chineseCount >= letterCount
     }
+}
+
+private struct PendingOCRPreview {
+    let sessionID: Int
+    let preflightElapsed: TimeInterval
 }

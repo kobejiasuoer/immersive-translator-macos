@@ -3,6 +3,7 @@ import SwiftUI
 
 enum TranslationPanelStatus {
     case loading
+    case ocrPreview
     case success
     case unchanged
     case warning
@@ -12,6 +13,8 @@ enum TranslationPanelStatus {
         switch self {
         case .loading:
             return "正在处理"
+        case .ocrPreview:
+            return "确认原文"
         case .success:
             return "翻译完成"
         case .unchanged:
@@ -27,6 +30,8 @@ enum TranslationPanelStatus {
         switch self {
         case .loading:
             return "sparkle.magnifyingglass"
+        case .ocrPreview:
+            return "text.viewfinder"
         case .success:
             return "checkmark.circle.fill"
         case .unchanged:
@@ -42,6 +47,8 @@ enum TranslationPanelStatus {
         switch self {
         case .loading:
             return .blue
+        case .ocrPreview:
+            return .teal
         case .success:
             return .green
         case .unchanged:
@@ -54,6 +61,11 @@ enum TranslationPanelStatus {
     }
 }
 
+enum TranslationPanelMode {
+    case translation
+    case ocrPreview
+}
+
 @MainActor
 final class TranslationPanelController {
     private let model = TranslationPanelModel()
@@ -61,6 +73,8 @@ final class TranslationPanelController {
     private let historyStore: TranslationHistoryStore
     private let onRetry: (String) -> Void
     private let onShowHistory: () -> Void
+    private let onOCRConfirm: (String) -> Void
+    private let onOCRReselect: () -> Void
     private var panel: NSPanel?
     private var autoHideTask: Task<Void, Never>?
     private var elapsedTask: Task<Void, Never>?
@@ -70,12 +84,16 @@ final class TranslationPanelController {
         settingsStore: SettingsStore,
         historyStore: TranslationHistoryStore,
         onRetry: @escaping (String) -> Void,
-        onShowHistory: @escaping () -> Void
+        onShowHistory: @escaping () -> Void,
+        onOCRConfirm: @escaping (String) -> Void,
+        onOCRReselect: @escaping () -> Void
     ) {
         self.settingsStore = settingsStore
         self.historyStore = historyStore
         self.onRetry = onRetry
         self.onShowHistory = onShowHistory
+        self.onOCRConfirm = onOCRConfirm
+        self.onOCRReselect = onOCRReselect
     }
 
     deinit {
@@ -96,6 +114,8 @@ final class TranslationPanelController {
         let panel = panel ?? makePanel()
         self.panel = panel
 
+        let wasOCRPreview = model.mode == .ocrPreview
+        model.mode = .translation
         model.original = original
         model.translation = translation
         model.isLoading = isLoading
@@ -113,10 +133,45 @@ final class TranslationPanelController {
         if isLoading {
             model.notice = ""
         }
+        if wasOCRPreview {
+            model.showOriginal = false
+        }
 
         DiagnosticLogger.log("translation.panel.show status=\(model.status.title) isLoading=\(isLoading) originalLength=\(original.count) translationLength=\(translation.count)")
 
         updateElapsedState(isLoading: isLoading, elapsed: elapsed)
+        position(panel)
+        panel.orderFrontRegardless()
+        scheduleAutoHideIfNeeded()
+    }
+
+    func showOCRPreview(
+        original: String,
+        imageDescription: String,
+        elapsed: TimeInterval
+    ) {
+        let panel = panel ?? makePanel()
+        self.panel = panel
+
+        let trimmedOriginal = original.trimmingCharacters(in: .whitespacesAndNewlines)
+        model.mode = .ocrPreview
+        model.original = original
+        model.translation = ""
+        model.isLoading = false
+        model.sourceLabel = TranslationSource.screenshotOCR.displayName
+        model.modelLabel = "\(settingsStore.ocrMode.title) · \(settingsStore.ocrLanguagePreset.title) · \(imageDescription)"
+        model.targetLanguage = settingsStore.displayTargetLanguage
+        model.status = trimmedOriginal.isEmpty ? .warning : .ocrPreview
+        model.statusMessage = trimmedOriginal.isEmpty
+            ? "没有识别到文字，可以重新框选，或手动输入后确认翻译。"
+            : "请确认识别文本，必要时可直接修正。"
+        model.isFavorite = false
+        model.notice = ""
+        model.showOriginal = false
+
+        DiagnosticLogger.log("ocr.preview.show textLength=\(original.count) image=\(imageDescription)")
+
+        updateElapsedState(isLoading: false, elapsed: elapsed)
         position(panel)
         panel.orderFrontRegardless()
         scheduleAutoHideIfNeeded()
@@ -146,6 +201,8 @@ final class TranslationPanelController {
         switch status {
         case .loading:
             return isLoading ? "我正在处理这段内容。" : "正在处理。"
+        case .ocrPreview:
+            return "请确认识别文本，必要时可直接修正。"
         case .success:
             return "译文已经准备好。"
         case .unchanged:
@@ -199,6 +256,14 @@ final class TranslationPanelController {
             },
             onShowHistory: { [weak self] in
                 self?.onShowHistory()
+            },
+            onOCRConfirm: { [weak self] text in
+                self?.autoHideTask?.cancel()
+                self?.onOCRConfirm(text)
+            },
+            onOCRReselect: { [weak self] in
+                self?.autoHideTask?.cancel()
+                self?.onOCRReselect()
             },
             onClose: { [weak self] in
                 self?.panel?.orderOut(nil)
@@ -309,6 +374,7 @@ final class TranslationPanelController {
 
 @MainActor
 final class TranslationPanelModel: ObservableObject {
+    @Published var mode: TranslationPanelMode = .translation
     @Published var original = ""
     @Published var translation = ""
     @Published var isLoading = false
@@ -332,6 +398,8 @@ struct TranslationPanelView: View {
     let onAutoHideChanged: () -> Void
     let onToggleFavorite: () -> Void
     let onShowHistory: () -> Void
+    let onOCRConfirm: (String) -> Void
+    let onOCRReselect: () -> Void
     let onClose: () -> Void
 
     var body: some View {
@@ -404,7 +472,16 @@ struct TranslationPanelView: View {
         }
     }
 
+    @ViewBuilder
     private var primaryContent: some View {
+        if model.mode == .ocrPreview {
+            ocrPreviewContent
+        } else {
+            translationContent
+        }
+    }
+
+    private var translationContent: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text(model.statusMessage)
@@ -466,7 +543,63 @@ struct TranslationPanelView: View {
         }
     }
 
+    private var ocrPreviewContent: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Text(model.statusMessage)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer()
+                if !model.targetLanguage.isEmpty {
+                    Text("目标：\(model.targetLanguage)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            ZStack(alignment: .topLeading) {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.primary.opacity(0.05))
+
+                TextEditor(text: $model.original)
+                    .font(.system(size: 14))
+                    .lineSpacing(4)
+                    .scrollContentBackground(.hidden)
+                    .padding(8)
+
+                if model.original.isEmpty {
+                    Text("在这里修正或输入 OCR 原文")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.tertiary)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 13)
+                        .allowsHitTesting(false)
+                }
+            }
+            .frame(minHeight: 154)
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+            )
+
+            hintLine(
+                systemName: "lock.shield",
+                text: "截图只用于本机 OCR；确认后才会把上面的文本发送给翻译接口。"
+            )
+        }
+    }
+
+    @ViewBuilder
     private var actions: some View {
+        if model.mode == .ocrPreview {
+            ocrPreviewActions
+        } else {
+            translationActions
+        }
+    }
+
+    private var translationActions: some View {
         HStack(spacing: 8) {
             actionButton("复制译文", systemName: "doc.on.doc", prominent: true, disabled: model.translationTrimmed.isEmpty || model.isLoading) {
                 copyToPasteboard(model.translationTrimmed, notice: "已复制译文")
@@ -489,6 +622,24 @@ struct TranslationPanelView: View {
             .buttonStyle(.borderless)
             .help("复制原文")
             .disabled(model.originalTrimmed.isEmpty)
+        }
+    }
+
+    private var ocrPreviewActions: some View {
+        HStack(spacing: 8) {
+            actionButton("确认翻译", systemName: "checkmark.circle", prominent: true, disabled: model.originalTrimmed.isEmpty) {
+                onOCRConfirm(model.originalTrimmed)
+            }
+            actionButton("重新框选", systemName: "viewfinder") {
+                onOCRReselect()
+            }
+            actionButton("复制原文", systemName: "doc.on.doc", disabled: model.originalTrimmed.isEmpty) {
+                copyToPasteboard(model.originalTrimmed, notice: "已复制原文")
+            }
+            actionButton("历史", systemName: "clock") {
+                onShowHistory()
+            }
+            Spacer(minLength: 0)
         }
     }
 

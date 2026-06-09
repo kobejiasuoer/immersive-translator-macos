@@ -11,7 +11,11 @@ CHECKSUM_PATH="$ZIP_PATH.sha256"
 
 cd "$ROOT_DIR"
 
-"$ROOT_DIR/scripts/build_app.sh"
+if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
+    "$ROOT_DIR/scripts/build_app.sh"
+else
+    CODESIGN_IDENTITY="-" "$ROOT_DIR/scripts/build_app.sh"
+fi
 
 rm -rf "$RELEASE_DIR"
 mkdir -p "$RELEASE_DIR"
