@@ -249,9 +249,11 @@ private final class ScreenSelectionWindow: NSWindow {
             contentRect: screen.frame,
             styleMask: [.borderless],
             backing: .buffered,
-            defer: false,
-            screen: screen
+            defer: false
         )
+        // Avoid NSWindow's screen-specific initializer here: on newer macOS builds
+        // it can re-enter the subclass's synthesized contentRect initializer and trap.
+        setFrame(screen.frame, display: false)
         backgroundColor = .clear
         isOpaque = false
         ignoresMouseEvents = false

@@ -148,13 +148,15 @@ final class TranslationPanelController {
     func showOCRPreview(
         original: String,
         imageDescription: String,
-        elapsed: TimeInterval
+        elapsed: TimeInterval,
+        sessionID: Int
     ) {
         let panel = panel ?? makePanel()
         self.panel = panel
 
         let trimmedOriginal = original.trimmingCharacters(in: .whitespacesAndNewlines)
         model.mode = .ocrPreview
+        model.ocrFocusToken += 1
         model.original = original
         model.translation = ""
         model.isLoading = false
@@ -163,7 +165,7 @@ final class TranslationPanelController {
         model.targetLanguage = settingsStore.displayTargetLanguage
         model.status = trimmedOriginal.isEmpty ? .warning : .ocrPreview
         model.statusMessage = trimmedOriginal.isEmpty
-            ? "没有识别到文字，可以重新框选，或手动输入后确认翻译。"
+            ? "没有识别到可用文字。可以直接输入或粘贴原文，也可以重新框选。"
             : "请确认识别文本，必要时可直接修正。"
         model.isFavorite = false
         model.notice = ""
@@ -173,8 +175,14 @@ final class TranslationPanelController {
 
         updateElapsedState(isLoading: false, elapsed: elapsed)
         position(panel)
-        panel.orderFrontRegardless()
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
         scheduleAutoHideIfNeeded()
+    }
+
+    func dismiss() {
+        autoHideTask?.cancel()
+        panel?.orderOut(nil)
     }
 
     private func resolvedStatus(
@@ -375,6 +383,7 @@ final class TranslationPanelController {
 @MainActor
 final class TranslationPanelModel: ObservableObject {
     @Published var mode: TranslationPanelMode = .translation
+    @Published var ocrFocusToken = 0
     @Published var original = ""
     @Published var translation = ""
     @Published var isLoading = false
@@ -415,6 +424,7 @@ struct TranslationPanelView: View {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .stroke(Color.primary.opacity(0.12), lineWidth: 1)
         )
+        .onExitCommand(perform: handleExitCommand)
     }
 
     private var header: some View {
@@ -562,14 +572,16 @@ struct TranslationPanelView: View {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(Color.primary.opacity(0.05))
 
-                TextEditor(text: $model.original)
-                    .font(.system(size: 14))
-                    .lineSpacing(4)
-                    .scrollContentBackground(.hidden)
-                    .padding(8)
+                OCRPreviewTextEditor(
+                    text: $model.original,
+                    focusToken: model.ocrFocusToken,
+                    onConfirm: confirmOCRPreviewIfPossible,
+                    onEscape: handleExitCommand
+                )
+                .padding(8)
 
                 if model.original.isEmpty {
-                    Text("在这里修正或输入 OCR 原文")
+                    Text(ocrPlaceholderText)
                         .font(.system(size: 14))
                         .foregroundStyle(.tertiary)
                         .padding(.horizontal, 14)
@@ -585,7 +597,7 @@ struct TranslationPanelView: View {
 
             hintLine(
                 systemName: "lock.shield",
-                text: "截图只用于本机 OCR；确认后才会把上面的文本发送给翻译接口。"
+                text: ocrHintText
             )
         }
     }
@@ -627,9 +639,15 @@ struct TranslationPanelView: View {
 
     private var ocrPreviewActions: some View {
         HStack(spacing: 8) {
-            actionButton("确认翻译", systemName: "checkmark.circle", prominent: true, disabled: model.originalTrimmed.isEmpty) {
-                onOCRConfirm(model.originalTrimmed)
+            Button(action: confirmOCRPreviewIfPossible) {
+                Label(model.originalTrimmed.isEmpty ? "输入后翻译" : "确认翻译", systemImage: "checkmark.circle")
+                    .lineLimit(1)
             }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .disabled(model.originalTrimmed.isEmpty)
+            .keyboardShortcut(.defaultAction)
+
             actionButton("重新框选", systemName: "viewfinder") {
                 onOCRReselect()
             }
@@ -701,6 +719,31 @@ struct TranslationPanelView: View {
         .font(.caption)
     }
 
+    private var ocrPlaceholderText: String {
+        "没有识别到文字时，可以直接粘贴或输入原文。\n按 Enter 翻译，按 Esc 重新框选。"
+    }
+
+    private var ocrHintText: String {
+        if model.originalTrimmed.isEmpty {
+            return "截图只用于本机 OCR；你可以先手动补全文字，再按 Enter 翻译，或按 Esc 重新框选。"
+        }
+        return "截图只用于本机 OCR；确认后才会把上面的文本发送给翻译接口。Enter 翻译，Esc 重新框选。"
+    }
+
+    private func confirmOCRPreviewIfPossible() {
+        let text = model.originalTrimmed
+        guard !text.isEmpty else { return }
+        onOCRConfirm(text)
+    }
+
+    private func handleExitCommand() {
+        if model.mode == .ocrPreview {
+            onOCRReselect()
+        } else {
+            onClose()
+        }
+    }
+
     private func copyToPasteboard(_ text: String, notice: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
@@ -728,5 +771,114 @@ private extension TranslationPanelModel {
             return translationTrimmed.isEmpty ? statusMessage : translationTrimmed
         }
         return translationTrimmed.isEmpty ? statusMessage : translationTrimmed
+    }
+}
+
+private struct OCRPreviewTextEditor: NSViewRepresentable {
+    @Binding var text: String
+    let focusToken: Int
+    let onConfirm: () -> Void
+    let onEscape: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text)
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+
+        let textView = OCRPreviewNSTextView()
+        textView.delegate = context.coordinator
+        textView.string = text
+        textView.drawsBackground = false
+        textView.isRichText = false
+        textView.importsGraphics = false
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isAutomaticTextReplacementEnabled = false
+        textView.allowsUndo = true
+        textView.font = .systemFont(ofSize: 14)
+        textView.textColor = .labelColor
+        textView.insertionPointColor = .labelColor
+        textView.textContainerInset = NSSize(width: 0, height: 2)
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.isHorizontallyResizable = false
+        textView.isVerticallyResizable = true
+        textView.autoresizingMask = [.width]
+        textView.onConfirm = onConfirm
+        textView.onEscape = onEscape
+
+        scrollView.documentView = textView
+        context.coordinator.textView = textView
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = context.coordinator.textView else { return }
+        if textView.string != text {
+            textView.string = text
+        }
+        textView.onConfirm = onConfirm
+        textView.onEscape = onEscape
+
+        if context.coordinator.lastFocusToken != focusToken {
+            context.coordinator.lastFocusToken = focusToken
+            DispatchQueue.main.async {
+                guard textView.window != nil else { return }
+                textView.window?.makeFirstResponder(textView)
+                let cursorLocation = textView.string.utf16.count
+                textView.setSelectedRange(NSRange(location: cursorLocation, length: 0))
+            }
+        }
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        @Binding var text: String
+        weak var textView: OCRPreviewNSTextView?
+        var lastFocusToken = -1
+
+        init(text: Binding<String>) {
+            _text = text
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView else { return }
+            text = textView.string
+        }
+    }
+}
+
+private final class OCRPreviewNSTextView: NSTextView {
+    var onConfirm: (() -> Void)?
+    var onEscape: (() -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        if hasMarkedText() {
+            super.keyDown(with: event)
+            return
+        }
+
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        switch event.keyCode {
+        case 36, 76:
+            if flags.isEmpty || flags == [.command] {
+                onConfirm?()
+                return
+            }
+        case 53:
+            if flags.isEmpty {
+                onEscape?()
+                return
+            }
+        default:
+            break
+        }
+
+        super.keyDown(with: event)
     }
 }

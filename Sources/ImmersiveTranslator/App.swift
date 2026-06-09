@@ -41,7 +41,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         },
         onOCRReselect: { [weak self] in
-            self?.startScreenSelection()
+            self?.restartScreenSelectionFromPreview()
         }
     )
     private lazy var settingsController = SettingsWindowController(settingsStore: settingsStore)
@@ -236,6 +236,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let sessionID = beginOCRSession()
         pendingOCRPreview = nil
+        panelController.dismiss()
         screenSelector = ScreenSelectionController { [weak self] image in
             Task { @MainActor in
                 guard let self, self.isCurrentOCRSession(sessionID) else { return }
@@ -277,7 +278,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             panelController.showOCRPreview(
                 original: text,
                 imageDescription: pixelSize,
-                elapsed: elapsed
+                elapsed: elapsed,
+                sessionID: sessionID
             )
         } catch {
             guard isCurrentOCRSession(sessionID) else { return }
@@ -312,6 +314,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         pendingOCRPreview = nil
         await translateText(trimmedText, source: .screenshotOCR, preflightElapsed: preview.preflightElapsed)
+    }
+
+    @MainActor
+    private func restartScreenSelectionFromPreview() {
+        pendingOCRPreview = nil
+        startScreenSelection()
     }
 
     @MainActor
