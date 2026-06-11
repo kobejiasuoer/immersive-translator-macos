@@ -3,6 +3,11 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="ImmersiveTranslator"
+APP_VERSION="${APP_VERSION:-0.1.0}"
+APP_BUILD="${APP_BUILD:-1}"
+APP_BUNDLE_ID="${APP_BUNDLE_ID:-local.immersive-translator.mvp}"
+APP_UPDATE_MANIFEST_URL="${APP_UPDATE_MANIFEST_URL:-}"
+APP_MINIMUM_SYSTEM_VERSION="${APP_MINIMUM_SYSTEM_VERSION:-13.0}"
 APP_DIR="$ROOT_DIR/dist/$APP_NAME.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
@@ -55,14 +60,48 @@ EOF
     exit 1
 }
 
+codesign_target() {
+    local identity="$1"
+    local target="$2"
+    local args=(--force --sign "$identity")
+
+    if [[ "${CODESIGN_HARDENED_RUNTIME:-0}" == "1" ]]; then
+        args+=(--options runtime)
+    fi
+
+    if [[ "${CODESIGN_TIMESTAMP:-0}" == "1" ]]; then
+        args+=(--timestamp)
+    fi
+
+    if [[ -n "${CODESIGN_ENTITLEMENTS:-}" ]]; then
+        args+=(--entitlements "$CODESIGN_ENTITLEMENTS")
+    fi
+
+    codesign "${args[@]}" "$target" >/dev/null
+}
+
+xml_escape() {
+    printf '%s' "$1" | sed \
+        -e 's/&/\&amp;/g' \
+        -e 's/</\&lt;/g' \
+        -e 's/>/\&gt;/g' \
+        -e 's/"/\&quot;/g' \
+        -e "s/'/\&apos;/g"
+}
+
 cd "$ROOT_DIR"
 swift build -c release
 
 rm -rf "$APP_DIR"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 cp "$ROOT_DIR/.build/release/$APP_NAME" "$MACOS_DIR/$APP_NAME"
+APP_BUNDLE_ID_ESCAPED="$(xml_escape "$APP_BUNDLE_ID")"
+APP_VERSION_ESCAPED="$(xml_escape "$APP_VERSION")"
+APP_BUILD_ESCAPED="$(xml_escape "$APP_BUILD")"
+APP_UPDATE_MANIFEST_URL_ESCAPED="$(xml_escape "$APP_UPDATE_MANIFEST_URL")"
+APP_MINIMUM_SYSTEM_VERSION_ESCAPED="$(xml_escape "$APP_MINIMUM_SYSTEM_VERSION")"
 
-cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
+cat > "$CONTENTS_DIR/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -72,7 +111,7 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
     <key>CFBundleExecutable</key>
     <string>ImmersiveTranslator</string>
     <key>CFBundleIdentifier</key>
-    <string>local.immersive-translator.mvp</string>
+    <string>$APP_BUNDLE_ID_ESCAPED</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
@@ -80,21 +119,24 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>$APP_VERSION_ESCAPED</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>$APP_BUILD_ESCAPED</string>
     <key>LSMinimumSystemVersion</key>
-    <string>13.0</string>
+    <string>$APP_MINIMUM_SYSTEM_VERSION_ESCAPED</string>
     <key>LSUIElement</key>
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>ITUpdateManifestURL</key>
+    <string>$APP_UPDATE_MANIFEST_URL_ESCAPED</string>
 </dict>
 </plist>
 PLIST
 
 SIGN_IDENTITY="$(resolve_codesign_identity)"
-codesign --force --sign "$SIGN_IDENTITY" "$MACOS_DIR/$APP_NAME" >/dev/null
-codesign --force --sign "$SIGN_IDENTITY" "$APP_DIR" >/dev/null
+codesign_target "$SIGN_IDENTITY" "$MACOS_DIR/$APP_NAME"
+codesign_target "$SIGN_IDENTITY" "$APP_DIR"
+codesign --verify --strict --verbose=2 "$APP_DIR" >/dev/null
 
 echo "$APP_DIR"

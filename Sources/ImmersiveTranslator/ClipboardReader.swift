@@ -1,12 +1,15 @@
 import AppKit
 
 enum SelectedTextReaderError: LocalizedError {
+    case accessibilityNotTrusted
     case copyFailed
 
     var errorDescription: String? {
         switch self {
+        case .accessibilityNotTrusted:
+            return "还没有辅助功能权限，无法模拟 Command + C 读取当前选区。请在系统设置里允许本工具使用辅助功能，授权后重新触发翻译。"
         case .copyFailed:
-            return "没有从当前 App 复制到文本。请确认已经选中文本，并允许辅助功能权限。"
+            return "没有从当前 App 复制到文本。请确认当前窗口仍在前台、已经选中可复制文字；某些 App 的自定义文本区域可能不响应模拟 Command + C。"
         }
     }
 }
@@ -14,6 +17,10 @@ enum SelectedTextReaderError: LocalizedError {
 enum SelectedTextReader {
     @MainActor
     static func readSelectedText() async throws -> String {
+        guard PermissionPrompter.isAccessibilityTrusted() else {
+            throw SelectedTextReaderError.accessibilityNotTrusted
+        }
+
         let pasteboard = NSPasteboard.general
         let snapshot = ClipboardSnapshot.capture(from: pasteboard)
         let originalChangeCount = pasteboard.changeCount

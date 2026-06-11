@@ -1,0 +1,301 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, for example 0.1.0"
+        required: true
+        type: string
+      tag:
+        description: "Git tag to publish. Defaults to v<version>."
+        required: false
+        type: string
+      build:
+        description: "CFBundleVersion. Defaults to the GitHub Actions run number."
+        required: false
+        type: string
+      draft:
+        description: "Create a draft GitHub Release."
+        required: false
+        default: false
+        type: boolean
+      prerelease:
+        description: "Mark the GitHub Release as a prerelease."
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: macos-latest
+    env:
+      APP_NAME: ImmersiveTranslator
+      APP_BUNDLE_ID: ${{ vars.APP_BUNDLE_ID || 'local.immersive-translator.mvp' }}
+      APP_MINIMUM_SYSTEM_VERSION: ${{ vars.APP_MINIMUM_SYSTEM_VERSION || '13.0' }}
+      CODESIGN_IDENTITY: ${{ vars.CODESIGN_IDENTITY || secrets.CODESIGN_IDENTITY || '' }}
+      MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      NOTARIZE_MODE: ${{ vars.NOTARIZE || 'auto' }}
+      NOTARYTOOL_PROFILE: ${{ secrets.NOTARYTOOL_PROFILE }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+      APP_STORE_CONNECT_API_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY_BASE64 }}
+      APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+      APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+      SKIP_SPCTL_ASSESS: ${{ vars.SKIP_SPCTL_ASSESS || '0' }}
+      WORKFLOW_INPUT_VERSION: ${{ inputs.version || '' }}
+      WORKFLOW_INPUT_TAG: ${{ inputs.tag || '' }}
+      WORKFLOW_INPUT_BUILD: ${{ inputs.build || '' }}
+      WORKFLOW_INPUT_DRAFT: ${{ inputs.draft || false }}
+      WORKFLOW_INPUT_PRERELEASE: ${{ inputs.prerelease || false }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Resolve release metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_EVENT_NAME" == "push" && "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+            release_tag="$GITHUB_REF_NAME"
+            version="${WORKFLOW_INPUT_VERSION:-${release_tag#v}}"
+          else
+            if [[ -z "${WORKFLOW_INPUT_VERSION:-}" ]]; then
+              echo "::error::Manual releases must provide a version, for example 0.1.0."
+              exit 1
+            fi
+            version="$WORKFLOW_INPUT_VERSION"
+            release_tag="${WORKFLOW_INPUT_TAG:-v$version}"
+          fi
+
+          build="${WORKFLOW_INPUT_BUILD:-$GITHUB_RUN_NUMBER}"
+          if [[ ! "$version" =~ ^[0-9]+([.][0-9]+)*([-+._A-Za-z0-9]*)?$ ]]; then
+            echo "::error::Release version '$version' must match the update manifest version format, for example 1.2.3."
+            exit 1
+          fi
+          if [[ ! "$build" =~ ^[0-9]+([.][0-9]+)*$ ]]; then
+            echo "::error::Build '$build' must be numeric, for example 42."
+            exit 1
+          fi
+
+          asset_zip="$APP_NAME-$version-macOS.zip"
+          repo_url="https://github.com/$GITHUB_REPOSITORY"
+          release_url="$repo_url/releases/tag/$release_tag"
+          asset_base_url="$repo_url/releases/download/$release_tag"
+          manifest_url="$repo_url/releases/latest/download/update-manifest.json"
+          download_url="$asset_base_url/$asset_zip"
+
+          {
+            echo "RELEASE_TAG=$release_tag"
+            echo "RELEASE_VERSION=$version"
+            echo "RELEASE_BUILD=$build"
+            echo "RELEASE_URL=$release_url"
+            echo "RELEASE_ASSET_BASE_URL=$asset_base_url"
+            echo "RELEASE_ZIP_NAME=$asset_zip"
+            echo "APP_UPDATE_MANIFEST_URL=$manifest_url"
+            echo "RELEASE_DOWNLOAD_URL=$download_url"
+            echo "RELEASE_NOTES_URL=$release_url"
+          } >> "$GITHUB_ENV"
+
+          {
+            echo "### Release"
+            echo "- Tag: \`$release_tag\`"
+            echo "- Version: \`$version\`"
+            echo "- Build: \`$build\`"
+            echo "- Manifest: $manifest_url"
+            echo "- Download: $download_url"
+            echo "- Notes: $release_url"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Import Developer ID certificate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${MACOS_CERTIFICATE_P12_BASE64:-}" ]]; then
+            if [[ -n "${CODESIGN_IDENTITY:-}" ]] && ! security find-identity -v -p codesigning 2>/dev/null | grep -Fq "\"$CODESIGN_IDENTITY\""; then
+              echo "::error::CODESIGN_IDENTITY is configured, but MACOS_CERTIFICATE_P12_BASE64 is missing and the identity is not installed on this runner."
+              exit 1
+            fi
+            echo "::warning::MACOS_CERTIFICATE_P12_BASE64 is not configured. The package script will fall back to ad-hoc signing unless this runner already has CODESIGN_IDENTITY installed."
+            exit 0
+          fi
+          if [[ -z "${MACOS_CERTIFICATE_PASSWORD:-}" ]]; then
+            echo "::error::MACOS_CERTIFICATE_PASSWORD is required when MACOS_CERTIFICATE_P12_BASE64 is set."
+            exit 1
+          fi
+          if [[ -z "${CODESIGN_IDENTITY:-}" ]]; then
+            echo "::error::CODESIGN_IDENTITY must name the Developer ID Application certificate."
+            exit 1
+          fi
+
+          keychain_password="$(uuidgen)"
+          keychain_path="$RUNNER_TEMP/immersive-translator-signing.keychain-db"
+          certificate_path="$RUNNER_TEMP/developer-id.p12"
+
+          printf '%s' "$MACOS_CERTIFICATE_P12_BASE64" | base64 --decode > "$certificate_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+          security default-keychain -s "$keychain_path"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain_path"
+
+      - name: Prepare App Store Connect API key
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${APP_STORE_CONNECT_API_KEY_BASE64:-}" ]]; then
+            exit 0
+          fi
+          if [[ -z "${APP_STORE_CONNECT_KEY_ID:-}" || -z "${APP_STORE_CONNECT_ISSUER_ID:-}" ]]; then
+            echo "::error::APP_STORE_CONNECT_KEY_ID and APP_STORE_CONNECT_ISSUER_ID are required when APP_STORE_CONNECT_API_KEY_BASE64 is set."
+            exit 1
+          fi
+
+          api_key_path="$RUNNER_TEMP/AuthKey_${APP_STORE_CONNECT_KEY_ID:-notary}.p8"
+          printf '%s' "$APP_STORE_CONNECT_API_KEY_BASE64" | base64 --decode > "$api_key_path"
+          chmod 600 "$api_key_path"
+          echo "APP_STORE_CONNECT_API_KEY=$api_key_path" >> "$GITHUB_ENV"
+
+      - name: Resolve signing mode
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          has_notary_credentials=0
+          if [[ -n "${NOTARYTOOL_PROFILE:-}" ]]; then
+            has_notary_credentials=1
+          elif [[ -n "${APPLE_ID:-}" && -n "${APPLE_TEAM_ID:-}" && -n "${APPLE_APP_PASSWORD:-}" ]]; then
+            has_notary_credentials=1
+          elif [[ -n "${APP_STORE_CONNECT_API_KEY:-}" && -n "${APP_STORE_CONNECT_KEY_ID:-}" && -n "${APP_STORE_CONNECT_ISSUER_ID:-}" ]]; then
+            has_notary_credentials=1
+          fi
+
+          case "$NOTARIZE_MODE" in
+            auto|0|1) ;;
+            true) NOTARIZE_MODE=1 ;;
+            false) NOTARIZE_MODE=0 ;;
+            *)
+              echo "::error::NOTARIZE must be auto, 1, 0, true, or false."
+              exit 1
+              ;;
+          esac
+
+          if [[ "$NOTARIZE_MODE" == "auto" ]]; then
+            if [[ -n "${CODESIGN_IDENTITY:-}" && "$has_notary_credentials" == "1" ]]; then
+              notarize=1
+            else
+              notarize=0
+            fi
+          else
+            notarize="$NOTARIZE_MODE"
+          fi
+
+          if [[ "$notarize" == "1" ]]; then
+            if [[ -z "${CODESIGN_IDENTITY:-}" ]]; then
+              echo "::error::NOTARIZE=1 requires CODESIGN_IDENTITY."
+              exit 1
+            fi
+            if [[ "$has_notary_credentials" != "1" ]]; then
+              echo "::error::NOTARIZE=1 requires notarytool credentials."
+              exit 1
+            fi
+          fi
+
+          echo "NOTARIZE=$notarize" >> "$GITHUB_ENV"
+          echo "- Notarize: \`$notarize\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Release preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CHECK_ONLY=1 \
+          APP_BUILD="$RELEASE_BUILD" \
+          APP_BUNDLE_ID="$APP_BUNDLE_ID" \
+          APP_MINIMUM_SYSTEM_VERSION="$APP_MINIMUM_SYSTEM_VERSION" \
+          APP_UPDATE_MANIFEST_URL="$APP_UPDATE_MANIFEST_URL" \
+          RELEASE_DOWNLOAD_URL="$RELEASE_DOWNLOAD_URL" \
+          RELEASE_NOTES_URL="$RELEASE_NOTES_URL" \
+          NOTARIZE="$NOTARIZE" \
+          SKIP_SPCTL_ASSESS="$SKIP_SPCTL_ASSESS" \
+          ./scripts/package_release.sh "$RELEASE_VERSION"
+
+      - name: Package release artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP_BUILD="$RELEASE_BUILD" \
+          APP_BUNDLE_ID="$APP_BUNDLE_ID" \
+          APP_MINIMUM_SYSTEM_VERSION="$APP_MINIMUM_SYSTEM_VERSION" \
+          APP_UPDATE_MANIFEST_URL="$APP_UPDATE_MANIFEST_URL" \
+          RELEASE_DOWNLOAD_URL="$RELEASE_DOWNLOAD_URL" \
+          RELEASE_NOTES_URL="$RELEASE_NOTES_URL" \
+          NOTARIZE="$NOTARIZE" \
+          SKIP_SPCTL_ASSESS="$SKIP_SPCTL_ASSESS" \
+          ./scripts/package_release.sh "$RELEASE_VERSION"
+
+      - name: Verify release manifest URLs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          manifest_path="release/update-manifest.json"
+          ruby -rjson -e '
+            manifest = JSON.parse(File.read(ARGV.fetch(0)))
+            expected_download = ARGV.fetch(1)
+            expected_notes = ARGV.fetch(2)
+            abort("download_url mismatch: #{manifest["download_url"]}") unless manifest["download_url"] == expected_download
+            abort("release_notes_url mismatch: #{manifest["release_notes_url"]}") unless manifest["release_notes_url"] == expected_notes
+            abort("sha256 must be lowercase hex") unless manifest["sha256"].match?(/\A[0-9a-f]{64}\z/)
+            abort("size_bytes must be positive") unless manifest["size_bytes"].is_a?(Integer) && manifest["size_bytes"].positive?
+          ' "$manifest_path" "$RELEASE_DOWNLOAD_URL" "$RELEASE_NOTES_URL"
+          shasum -a 256 -c "release/$RELEASE_ZIP_NAME.sha256"
+
+      - name: Create or update GitHub Release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          assets=(
+            "release/$RELEASE_ZIP_NAME"
+            "release/$RELEASE_ZIP_NAME.sha256"
+            "release/update-manifest.json"
+          )
+          title="$APP_NAME $RELEASE_VERSION"
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+            gh release edit "$RELEASE_TAG" --title "$title"
+          else
+            create_args=(release create "$RELEASE_TAG" "${assets[@]}" --title "$title" --target "$GITHUB_SHA" --generate-notes)
+            if [[ "$WORKFLOW_INPUT_DRAFT" == "true" ]]; then
+              create_args+=(--draft)
+            fi
+            if [[ "$WORKFLOW_INPUT_PRERELEASE" == "true" ]]; then
+              create_args+=(--prerelease)
+            fi
+            gh "${create_args[@]}"
+          fi
+
+          echo "- GitHub Release: $RELEASE_URL" >> "$GITHUB_STEP_SUMMARY"

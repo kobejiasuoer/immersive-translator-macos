@@ -62,10 +62,10 @@ private struct OnboardingView: View {
             VStack(alignment: .leading, spacing: 14) {
                 checklistRow(
                     icon: "key.fill",
-                    title: "配置 API Key",
-                    detail: "用于调用 OpenAI 或兼容翻译接口。Key 只保存在本机 macOS Keychain。"
+                    title: apiKeyStepTitle,
+                    detail: apiKeyStepDetail
                     ,
-                    isDone: !settingsStore.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                    isDone: apiKeyStepIsDone,
                     actionTitle: "打开设置",
                     action: onOpenSettings
                 )
@@ -116,6 +116,25 @@ private struct OnboardingView: View {
         }
         .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var apiKeyStepTitle: String {
+        apiKeyIsRequired ? "配置 API Key" : "确认本地接口"
+    }
+
+    private var apiKeyStepDetail: String {
+        if apiKeyIsRequired {
+            return "用于调用 OpenAI 或兼容翻译接口。Key 只保存在本机 macOS Keychain。"
+        }
+        return "当前接口是本地 OpenAI 兼容服务，不需要真实 API Key；请确认本地模型服务已经启动。"
+    }
+
+    private var apiKeyStepIsDone: Bool {
+        !apiKeyIsRequired || !settingsStore.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var apiKeyIsRequired: Bool {
+        TranslationClient.requiresAPIKey(for: settingsStore.endpoint.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     private func checklistRow(
