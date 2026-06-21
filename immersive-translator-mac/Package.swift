@@ -13,6 +13,7 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "ImmersiveTranslator",
+            dependencies: ["ProviderCore"],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("Carbon"),
@@ -20,6 +21,10 @@ let package = Package(
                 .linkedFramework("Vision"),
                 .linkedFramework("SwiftUI")
             ]
+        ),
+        .target(
+            name: "ProviderCore",
+            dependencies: []
         )
     ]
 )
