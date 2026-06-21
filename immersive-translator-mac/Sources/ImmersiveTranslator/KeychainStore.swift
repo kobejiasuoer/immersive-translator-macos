@@ -83,4 +83,44 @@ enum KeychainStore {
             throw KeychainStoreError.unexpectedStatus(status)
         }
     }
+
+    // MARK: - Provider-scoped API Key slots
+
+    /// 与 SettingsStore.Keys.keychainService 一致; 旧全局 key 存在 account=legacyAccount,
+    /// 新 key 按 providerId 分槽存在 account="apiKey.<providerId>"。
+    private static let providerService = "local.immersive-translator.mvp"
+    static let legacyAccount = "apiKey"
+
+    /// 读取某 provider 的 key; 不存在或为空返回 nil。
+    static func apiKey(for providerId: String) -> String? {
+        guard let raw = try? string(service: providerService, account: accountKey(for: providerId)),
+              !raw.isEmpty else {
+            return nil
+        }
+        return raw
+    }
+
+    /// 写入某 provider 的 key; 空串表示删除该槽,避免残留失效 key。
+    /// 写失败时记日志不抛给 UI(输入仍在内存,下次落盘再试)。
+    static func setAPIKey(_ value: String, for providerId: String) {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            if trimmed.isEmpty {
+                try delete(service: providerService, account: accountKey(for: providerId))
+            } else {
+                try setString(trimmed, service: providerService, account: accountKey(for: providerId))
+            }
+        } catch {
+            DiagnosticLogger.log("keychain.write.failed providerId=\(providerId) error=\(error.localizedDescription)")
+        }
+    }
+
+    /// 删除某 provider 的 key 槽(删除自定义 provider 时调用)。
+    static func deleteAPIKey(for providerId: String) {
+        try? delete(service: providerService, account: accountKey(for: providerId))
+    }
+
+    private static func accountKey(for providerId: String) -> String {
+        "apiKey.\(providerId)"
+    }
 }
