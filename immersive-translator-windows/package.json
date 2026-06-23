@@ -1,0 +1,17 @@
+{
+  "name": "immersive-translator-windows",
+  "version": "1.0.0",
+  "description": "Tauri + TypeScript 实现的 Windows 版 ImmersiveTranslator。**开发中**。",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/node": "^26.0.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.9"
+  }
+}

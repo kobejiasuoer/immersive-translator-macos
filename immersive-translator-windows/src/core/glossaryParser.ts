@@ -32,15 +32,37 @@ function parseLine(line: string): GlossaryEntry | null {
   // 表头
   if (isHeader(trimmed)) return null;
 
-  // 尝试分隔符，按优先级：
-  // -> 、 = 、 中文冒号、英文冒号、制表符、竖线、中文逗号、逗号
-  const separators = ["->", "=", "：", ":", "\t", "|", "，", ","];
+  // 分隔符按优先级尝试：
+  //   键值分隔符（target 取分隔符后整行剩余）：-> 、 = 、 中文冒号、英文冒号
+  //   列分隔符（TSV/CSV/竖线，target 只取第二列）：制表符、竖线、中文逗号、英文逗号
+  const kvSeparators = ["->", "=", "：", ":"];
+  const colSeparators = ["\t", "|", "，", ","];
 
-  for (const sep of separators) {
+  // 优先匹配键值分隔符
+  for (const sep of kvSeparators) {
     const idx = trimmed.indexOf(sep);
     if (idx > 0) {
       const source = trimmed.slice(0, idx).trim();
       const target = trimmed.slice(idx + sep.length).trim();
+      if (source !== "" && target !== "") {
+        return { source, target };
+      }
+    }
+  }
+
+  // 再匹配列分隔符：取第二列（首个分隔符到下一个列分隔符或行尾）
+  for (const sep of colSeparators) {
+    const firstIdx = trimmed.indexOf(sep);
+    if (firstIdx > 0) {
+      const source = trimmed.slice(0, firstIdx).trim();
+      const rest = trimmed.slice(firstIdx + sep.length);
+      // 第二列：在 rest 中找下一个列分隔符截断
+      let endIdx = rest.length;
+      for (const s2 of colSeparators) {
+        const i = rest.indexOf(s2);
+        if (i >= 0 && i < endIdx) endIdx = i;
+      }
+      const target = rest.slice(0, endIdx).trim();
       if (source !== "" && target !== "") {
         return { source, target };
       }
