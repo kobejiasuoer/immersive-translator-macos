@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_CONTROL,
 };
+use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowTextW};
 
 const VK_C: u16 = 0x43;
 
@@ -28,6 +29,25 @@ unsafe fn send_key(vk: u16, up: bool) {
     let ptr = [input].as_ptr();
     // SendInput 返回成功注入的事件数；忽略返回值，失败也无能为力
     SendInput(1, ptr, std::mem::size_of::<INPUT>() as i32);
+}
+
+/// 打印当前前台窗口的标题，用于诊断焦点位置。
+fn log_foreground_window() {
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.is_null() {
+            eprintln!("[read_selection] foreground window: (none)");
+            return;
+        }
+        let mut buf = [0u16; 512];
+        let len = GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
+        let title = if len > 0 {
+            String::from_utf16_lossy(&buf[..len as usize])
+        } else {
+            "(no title)".to_string()
+        };
+        eprintln!("[read_selection] foreground window: hwnd={hwnd:?}, title={title:?}");
+    }
 }
 
 /// 模拟 Ctrl+C（直接调 Win32 SendInput，绕开 enigo）。
@@ -64,6 +84,8 @@ pub fn read_selection_impl() -> Result<String, String> {
     );
 
     // 2. 模拟 Ctrl+C（直接 SendInput，不经过 enigo）
+    // 先打印当前前台窗口，诊断焦点问题
+    log_foreground_window();
     eprintln!("[read_selection] sending Ctrl+C via SendInput");
     send_ctrl_c();
     eprintln!("[read_selection] Ctrl+C sent");
