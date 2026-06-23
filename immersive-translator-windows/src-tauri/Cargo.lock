@@ -1893,6 +1893,7 @@ dependencies = [
  "tauri-plugin-global-shortcut",
  "tauri-plugin-opener",
  "tokio",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
