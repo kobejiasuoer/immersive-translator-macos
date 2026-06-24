@@ -92,3 +92,47 @@ export function parseGlossary(text: string): ParsedGlossary {
 
   return { entries, toSend, localOnlyCount };
 }
+
+export interface GlossaryStats {
+  valid: number;
+  invalid: number;
+  overLimit: number;
+}
+
+/** 统计词库：有效条数、无法解析的行数、超出上限的条数。用于格式预检。 */
+export function glossaryStats(text: string): GlossaryStats {
+  const parsed = parseGlossary(text);
+  const lines = text.split(/\r?\n/);
+  let invalid = 0;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed === "") continue;
+    if (trimmed.startsWith("#") || trimmed.startsWith("//")) continue;
+    if (isHeader(trimmed)) continue;
+    // 能解析到这里说明有效
+    if (parseLine(trimmed) === null) invalid++;
+  }
+  return {
+    valid: parsed.entries.length,
+    invalid,
+    overLimit: parsed.localOnlyCount,
+  };
+}
+
+/**
+ * 把词库文本去重并规范化为 `source = target` 格式输出。
+ * 用于"去重"和"导出"按钮。
+ */
+export function dedupAndNormalize(text: string): string {
+  const { entries } = parseGlossary(text);
+  return entries.map((e) => `${e.source} = ${e.target}`).join("\n");
+}
+
+/**
+ * 把新文本合并进已有词库文本，去重后返回。
+ * 用于"导入"按钮（追加，不覆盖）。
+ */
+export function mergeGlossary(existing: string, incoming: string): string {
+  const combined = `${existing}\n${incoming}`;
+  return dedupAndNormalize(combined);
+}

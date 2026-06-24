@@ -38,10 +38,7 @@ fn is_key_down(vk: u16) -> bool {
 fn wait_for_hotkey_release(timeout: Duration) {
     let start = Instant::now();
     while start.elapsed() < timeout {
-        if !is_key_down(VK_CONTROL as u16)
-            && !is_key_down(VK_SHIFT as u16)
-            && !is_key_down(VK_Q)
-        {
+        if !is_key_down(VK_CONTROL as u16) && !is_key_down(VK_SHIFT as u16) && !is_key_down(VK_Q) {
             thread::sleep(Duration::from_millis(80));
             return;
         }

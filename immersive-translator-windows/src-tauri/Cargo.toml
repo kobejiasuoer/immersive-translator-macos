@@ -21,12 +21,21 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 tauri-plugin-global-shortcut = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 enigo = "0.5"
 arboard = "3"
-windows-sys = { version = "0.59", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.59", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Security_Cryptography", "Win32_System_Memory", "Win32_Graphics_Gdi"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
 tokio = { version = "1", features = ["full"] }
 futures-util = "0.3"
+base64 = "0.22"
+
+# OCR（PaddleOCR via ONNX Runtime）。
+# ort 用 download-binaries 预下载编译好的 onnxruntime，避免 bindgen/libclang 依赖。
+ort = { version = "2.0.0-rc.10", default-features = false, features = ["download-binaries"] }
+paddle-ocr-rs = "0.6"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "bmp"] }
 

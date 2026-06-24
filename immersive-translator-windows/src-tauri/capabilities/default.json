@@ -11,6 +11,10 @@
     "core:window:allow-cursor-position",
     "core:window:allow-outer-position",
     "core:window:allow-set-position",
-    "global-shortcut:default"
+    "core:window:allow-start-resize-dragging",
+    "core:window:allow-set-size",
+    "global-shortcut:default",
+    "updater:default",
+    "process:default"
   ]
 }

@@ -3,65 +3,196 @@ import { listen } from "@tauri-apps/api/event";
 import { cursorPosition, getCurrentWindow, PhysicalPosition } from "@tauri-apps/api/window";
 import {
   translateStream,
+  cancelTranslation,
   openSettings,
+  openHistory,
   onTranslationDelta,
+  onTranslationStatus,
   onTranslationDone,
   onTranslationError,
+  onTranslationCancelled,
+  historyAdd,
+  historyToggleFavorite,
+  clearPendingPanelPayload,
+  takePendingPanelPayload,
   type DoneEvent,
   type ErrorEvent,
+  type PanelPayload,
+  type PanelSource,
+  type TranslationPhase,
 } from "../lib/tauriBridge";
-import { loadSettings, hasValidSettings } from "../lib/settingsStore";
+import { loadSettingsAsync, hasValidSettings } from "../lib/settingsStore";
 import { classifyTranslationError } from "../core/errorMessageFormatter";
 import { resolveTargetLanguage } from "../core/languageDetect";
 import { buildSystemPrompt } from "../core/promptBuilder";
 
 type Status = "idle" | "reading" | "translating" | "done" | "error" | "needsConfig";
+type PanelShownPayload = string | Partial<PanelPayload>;
+type ResizeDirection = "East" | "South" | "SouthEast";
 
 const panelWindow = getCurrentWindow();
+
+/** 根据阶段 + 是否已有文字给出加载文案，对齐 Mac 的状态机语义。 */
+function phaseLabel(phase: TranslationPhase | null, text: string): string {
+  if (text) return "翻译中…";
+  switch (phase) {
+    case "connecting":
+      return "正在连接服务商…";
+    case "waitingFirstToken":
+      return "已连接，等待首个字符…";
+    case "streaming":
+      return "翻译中…";
+    default:
+      return "翻译中…";
+  }
+}
+
+/** 毫秒格式化：< 1000 显示 ms，否则显示 s。 */
+function fmtMs(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+/** 偏慢原因提示（对齐 Mac：连接或首字过慢时给排查方向）。 */
+function slowHint(t: {
+  connectMs: number;
+  firstTokenMs: number;
+  totalMs: number;
+}): string {
+  if (t.connectMs > 3000) {
+    return " · 连接偏慢：网络到服务商延迟高，或需要代理";
+  }
+  if (t.firstTokenMs > 5000) {
+    return " · 首字偏慢：模型推理或排队耗时";
+  }
+  return "";
+}
 
 export function TranslationPanel() {
   const [status, setStatus] = useState<Status>("idle");
   const [original, setOriginal] = useState("");
   const [translated, setTranslated] = useState("");
   const [elapsedMs, setElapsedMs] = useState(0);
+  const [phase, setPhase] = useState<TranslationPhase | null>(null);
+  /** 拆分耗时：连接 / 首字 / 总耗时。 */
+  const [timing, setTiming] = useState<{ connectMs: number; firstTokenMs: number; totalMs: number } | null>(null);
   const [errorMsg, setErrorMsg] = useState("");
   const [retryable, setRetryable] = useState(false);
+  const [copiedHint, setCopiedHint] = useState("");
+  /** 固定状态：固定后浮窗不会因失焦自动隐藏。 */
+  const [pinned, setPinned] = useState(false);
+  /** 最近一次翻译落库后的历史记录 id，用于收藏按钮。 */
+  const [lastRecordId, setLastRecordId] = useState<string | null>(null);
+  /** 收藏按钮的本地镜像，用于即时反馈。 */
+  const [favToggled, setFavToggled] = useState(false);
   const lastOriginalRef = useRef("");
+  const lastEndpointRef = useRef("");
+  const lastSourceRef = useRef<PanelSource>("selection");
+  const lastPanelPayloadRef = useRef("");
+  const lastPanelPayloadAtRef = useRef(0);
+  const lastDoneHistoryKeyRef = useRef("");
   const dragStateRef = useRef<{ offsetX: number; offsetY: number } | null>(null);
   const dragMovePendingRef = useRef(false);
+  const resizingRef = useRef(false);
 
   useEffect(() => {
     let unDelta: (() => void) | undefined;
     let unDone: (() => void) | undefined;
     let unErr: (() => void) | undefined;
+    let unStatus: (() => void) | undefined;
+
+    let active = true;
 
     onTranslationDelta((e) => {
+      if (!active) return;
       setTranslated(e.text);
-      setElapsedMs(e.elapsed_ms);
-    }).then((u) => (unDelta = u));
+      setElapsedMs(e.elapsedMs);
+    }).then((u) => {
+      if (active) unDelta = u;
+      else u();
+    });
+
+    onTranslationStatus((e) => {
+      if (!active) return;
+      setPhase(e.phase);
+      setElapsedMs(e.elapsedMs);
+    }).then((u) => {
+      if (active) unStatus = u;
+      else u();
+    });
 
     onTranslationDone((e: DoneEvent) => {
+      if (!active) return;
       setTranslated(e.text);
-      setElapsedMs(e.elapsed_ms);
+      setElapsedMs(e.elapsedMs);
+      setTiming({ connectMs: e.connectMs, firstTokenMs: e.firstTokenMs, totalMs: e.elapsedMs });
+      setPhase("done");
       setStatus("done");
-    }).then((u) => (unDone = u));
+      // 落库到历史记录（fire-and-forget，失败不影响展示）
+      const original = lastOriginalRef.current;
+      const trimmed = original.trim();
+      const transTrimmed = e.text.trim();
+      if (trimmed && transTrimmed) {
+        const historyKey = `${lastSourceRef.current}\u0000${trimmed}\u0000${transTrimmed}\u0000${e.elapsedMs}`;
+        if (lastDoneHistoryKeyRef.current === historyKey) {
+          return;
+        }
+        lastDoneHistoryKeyRef.current = historyKey;
+        // 目标语言此刻未知（doTranslate 里算的），这里用 settings 简单推断
+        void loadSettingsAsync().then((s) =>
+          historyAdd(
+            trimmed,
+            transTrimmed,
+            resolveTargetLanguage(trimmed, { mode: s.translationMode, fixed: s.fixedTarget }),
+            lastSourceRef.current,
+            s.model,
+            e.elapsedMs,
+          )
+            .then((rec) => setLastRecordId(rec.id))
+            .catch((err) => console.error("[history] add failed", err)),
+        );
+      }
+    }).then((u) => {
+      if (active) unDone = u;
+      else u();
+    });
 
     onTranslationError((e: ErrorEvent) => {
-      const classified = classifyTranslationError(toInput(e));
+      if (!active) return;
+      const classified = classifyTranslationError(toInput(e), lastEndpointRef.current);
       setErrorMsg(classified.message);
       setRetryable(classified.retryable);
       setStatus("error");
-    }).then((u) => (unErr = u));
+    }).then((u) => {
+      if (active) unErr = u;
+      else u();
+    });
+
+    let unCancel: (() => void) | undefined;
+    onTranslationCancelled((e) => {
+      if (!active) return;
+      // 用户取消：保留已翻译的部分，进入 done 态
+      setTranslated(e.partial);
+      setElapsedMs(e.elapsedMs);
+      setStatus("done");
+    }).then((u) => {
+      if (active) unCancel = u;
+      else u();
+    });
 
     return () => {
+      active = false;
       unDelta?.();
       unDone?.();
       unErr?.();
+      unStatus?.();
+      unCancel?.();
     };
   }, []);
 
   async function doTranslate(text: string) {
-    const s = loadSettings();
+    const s = await loadSettingsAsync();
+    lastEndpointRef.current = s.endpoint;
     const target = resolveTargetLanguage(text, {
       mode: s.translationMode,
       fixed: s.fixedTarget,
@@ -75,6 +206,11 @@ export function TranslationPanel() {
     setStatus("translating");
     setTranslated("");
     setErrorMsg("");
+    setPhase(null);
+    setTiming(null);
+    setLastRecordId(null);
+    setFavToggled(false);
+    lastDoneHistoryKeyRef.current = "";
 
     try {
       await translateStream({
@@ -94,8 +230,8 @@ export function TranslationPanel() {
     }
   }
 
-  async function triggerWithText(text: string) {
-    const s = loadSettings();
+  async function triggerWithText(text: string, source: PanelSource = "selection") {
+    const s = await loadSettingsAsync();
     if (!hasValidSettings(s)) {
       setStatus("needsConfig");
       return;
@@ -107,6 +243,7 @@ export function TranslationPanel() {
       return;
     }
     lastOriginalRef.current = text;
+    lastSourceRef.current = source;
     setOriginal(text);
     setTranslated("");
     setErrorMsg("");
@@ -114,10 +251,27 @@ export function TranslationPanel() {
     await doTranslate(text);
   }
 
+  async function handlePanelPayload(payload: PanelPayload) {
+    const key = `${payload.source}\u0000${payload.text}`;
+    const now = Date.now();
+    if (lastPanelPayloadRef.current === key && now - lastPanelPayloadAtRef.current < 1500) {
+      return;
+    }
+    lastPanelPayloadRef.current = key;
+    lastPanelPayloadAtRef.current = now;
+    await triggerWithText(payload.text, payload.source);
+  }
+
   async function retry() {
     if (lastOriginalRef.current) {
       await doTranslate(lastOriginalRef.current);
     }
+  }
+
+  /** 短暂显示复制提示（2 秒后消失）。 */
+  function flashCopied(msg: string) {
+    setCopiedHint(msg);
+    setTimeout(() => setCopiedHint(""), 2000);
   }
 
   async function hidePanel() {
@@ -171,27 +325,117 @@ export function TranslationPanel() {
     dragStateRef.current = null;
   }
 
+  async function startResize(direction: ResizeDirection, event: React.PointerEvent<HTMLDivElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    resizingRef.current = true;
+    window.setTimeout(() => {
+      resizingRef.current = false;
+    }, 1200);
+    try {
+      await panelWindow.startResizeDragging(direction);
+    } finally {
+      window.setTimeout(() => {
+        resizingRef.current = false;
+      }, 250);
+    }
+  }
+
   useEffect(() => {
+    let active = true;
+    void takePendingPanelPayload().then((payload) => {
+      if (active && payload) {
+        void handlePanelPayload(payload);
+      }
+    });
+
     let unlisten: (() => void) | undefined;
-    listen<string>("panel:shown", (event) => triggerWithText(event.payload ?? "")).then(
-      (u) => (unlisten = u),
+    listen<PanelShownPayload>("panel:shown", (event) => {
+      if (!active) return;
+      const payload = event.payload;
+      const text = typeof payload === "string" ? payload : payload.text ?? "";
+      const source = typeof payload === "string" ? "selection" : payload.source ?? "selection";
+      void clearPendingPanelPayload();
+      void handlePanelPayload({ text, source });
+    }).then(
+      (u) => {
+        if (active) unlisten = u;
+        else u();
+      },
     );
-    return () => unlisten?.();
+    return () => {
+      active = false;
+      unlisten?.();
+    };
   }, []);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
+      // Esc：关闭浮窗
       if (event.key === "Escape") {
         event.preventDefault();
         void hidePanel();
+        return;
+      }
+      // Ctrl/Cmd + Enter：复制译文（done 时）
+      if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+        if (status === "done" && translated) {
+          event.preventDefault();
+          void navigator.clipboard.writeText(translated);
+          flashCopied("已复制译文");
+        }
+        return;
+      }
+      // Ctrl/Cmd + Shift + C：复制组合（原文 + 译文）
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && (event.key === "C" || event.key === "c")) {
+        if (status === "done" && translated && original) {
+          event.preventDefault();
+          const combo = `${original}\n\n${translated}`;
+          void navigator.clipboard.writeText(combo);
+          flashCopied("已复制原文+译文");
+        }
+        return;
+      }
+      // Ctrl/Cmd + R：重试（error retryable 时）
+      if ((event.ctrlKey || event.metaKey) && event.key === "r") {
+        if (status === "error" && retryable) {
+          event.preventDefault();
+          void retry();
+        }
+        return;
       }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [status, translated, original, retryable]);
+
+  // 自动隐藏：浮窗失焦且未固定时，延迟 400ms 隐藏（对齐 Mac）。
+  useEffect(() => {
+    const unlistenPromise = panelWindow.onFocusChanged(({ payload: focused }) => {
+      const canAutoHide = status === "idle" || status === "done";
+      if (!focused && !pinned && canAutoHide && !resizingRef.current) {
+        // 延迟以避免点击浮窗内按钮瞬间失焦导致误隐藏
+        window.setTimeout(() => {
+          if (!resizingRef.current) {
+            void panelWindow.hide();
+          }
+        }, 400);
+      }
+    });
+    return () => {
+      void unlistenPromise.then((u) => u());
+    };
+  }, [pinned, status]);
+
+  /** 切换最近一条历史记录的收藏状态。 */
+  async function toggleFavorite() {
+    if (!lastRecordId) return;
+    await historyToggleFavorite(lastRecordId);
+    setFavToggled((v) => !v);
+  }
 
   return (
-    <div style={panelStyle}>
+    <div style={panelShellStyle}>
       <div style={headerStyle}>
         <div
           style={dragHandleStyle}
@@ -205,15 +449,62 @@ export function TranslationPanel() {
         </div>
         <div style={actionsStyle}>
           {status === "done" && (
-            <button style={smallBtnStyle} onClick={() => navigator.clipboard.writeText(translated)}>
-              复制
-            </button>
+            <>
+              <button
+                style={smallBtnStyle}
+                onClick={() => {
+                  void navigator.clipboard.writeText(translated);
+                  flashCopied("已复制译文");
+                }}
+                title="Ctrl+Enter"
+              >
+                复制
+              </button>
+              <button
+                style={smallBtnStyle}
+                onClick={() => {
+                  void navigator.clipboard.writeText(`${original}\n\n${translated}`);
+                  flashCopied("已复制原文+译文");
+                }}
+                title="Ctrl+Shift+C"
+              >
+                复制组合
+              </button>
+            </>
           )}
           {status === "error" && retryable && (
-            <button style={smallBtnStyle} onClick={retry}>
+            <button style={smallBtnStyle} onClick={retry} title="Ctrl+R">
               重试
             </button>
           )}
+          {status === "translating" && (
+            <button
+              style={smallBtnStyle}
+              onClick={() => void cancelTranslation()}
+              title="取消当前请求"
+            >
+              取消
+            </button>
+          )}
+          {status === "done" && lastRecordId && (
+            <button
+              style={iconBtnStyle}
+              onClick={() => void toggleFavorite()}
+              title={favToggled ? "取消收藏" : "收藏"}
+            >
+              {favToggled ? "★" : "☆"}
+            </button>
+          )}
+          <button
+            style={pinned ? activeIconBtnStyle : iconBtnStyle}
+            onClick={() => setPinned((v) => !v)}
+            title={pinned ? "已固定（失焦不隐藏）" : "固定浮窗"}
+          >
+            📌
+          </button>
+          <button style={iconBtnStyle} onClick={() => openHistory()} title="翻译历史">
+            ☰
+          </button>
           <button style={iconBtnStyle} onClick={() => openSettings()} title="打开设置">
             ⚙
           </button>
@@ -223,37 +514,68 @@ export function TranslationPanel() {
         </div>
       </div>
 
-      {status === "needsConfig" && (
-        <div style={needsConfigStyle}>
-          <div style={{ marginBottom: 10 }}>尚未配置翻译接口。</div>
-          <button style={openSettingsBtnStyle} onClick={() => openSettings()}>
-            打开设置
-          </button>
-        </div>
-      )}
+      <div style={contentStyle}>
+        {status === "needsConfig" && (
+          <div style={needsConfigStyle}>
+            <div style={{ marginBottom: 10 }}>尚未配置翻译接口。</div>
+            <button style={openSettingsBtnStyle} onClick={() => openSettings()}>
+              打开设置
+            </button>
+          </div>
+        )}
 
-      {(status === "reading" || status === "translating") && (
-        <div style={loadingStyle}>
-          {status === "reading" ? "正在读取选中文本..." : "翻译中..."}
-          {status === "translating" && translated && (
+        {(status === "reading" || status === "translating") && (
+          <div style={loadingStyle}>
+            {status === "reading"
+              ? "正在读取选中文本..."
+              : phaseLabel(phase, translated)}
+            {elapsedMs > 0 && status === "translating" && (
+              <div style={phaseTimingStyle}>{(elapsedMs / 1000).toFixed(1)}s</div>
+            )}
+            {status === "translating" && translated && (
+              <div style={translatedStyle}>{translated}</div>
+            )}
+          </div>
+        )}
+
+        {status === "done" && (
+          <>
+            <div style={originalStyle}>{original}</div>
             <div style={translatedStyle}>{translated}</div>
-          )}
-        </div>
-      )}
+            <div style={metaStyle}>
+              {timing ? (
+                <>
+                  总耗时 {(timing.totalMs / 1000).toFixed(1)}s
+                  <span style={timingBreakStyle}>
+                    （连接 {fmtMs(timing.connectMs)} · 首字 {fmtMs(timing.firstTokenMs)}）
+                    {slowHint(timing)}
+                  </span>
+                </>
+              ) : (
+                <>耗时 {(elapsedMs / 1000).toFixed(1)}s</>
+              )}
+            </div>
+          </>
+        )}
 
-      {status === "done" && (
-        <>
-          <div style={originalStyle}>{original}</div>
-          <div style={translatedStyle}>{translated}</div>
-          <div style={metaStyle}>耗时 {(elapsedMs / 1000).toFixed(1)}s</div>
-        </>
-      )}
+        {status === "idle" && (
+          <div style={idleStyle}>
+            选中任意文本，按热键翻译。
+            <div style={shortcutHintStyle}>
+              快捷键：Esc 关闭 · Ctrl+Enter 复制译文 · Ctrl+Shift+C 复制原文+译文 · Ctrl+R 重试
+            </div>
+          </div>
+        )}
 
-      {status === "idle" && (
-        <div style={idleStyle}>选中任意文本，按 Ctrl+Shift+Q 翻译。</div>
-      )}
+        {status === "error" && <div style={errorStyle}>{errorMsg}</div>}
+      </div>
 
-      {status === "error" && <div style={errorStyle}>{errorMsg}</div>}
+      {copiedHint && <div style={toastStyle}>{copiedHint}</div>}
+      <div
+        style={resizeHandleStyle}
+        onPointerDown={(event) => void startResize("SouthEast", event)}
+        title="拖动调整浮窗大小"
+      />
     </div>
   );
 }
@@ -274,23 +596,39 @@ function toInput(e: ErrorEvent) {
   }
 }
 
-const panelStyle: React.CSSProperties = {
-  padding: 14,
+const panelShellStyle: React.CSSProperties = {
   fontFamily: "system-ui, -apple-system, sans-serif",
   fontSize: 14,
   background: "rgba(255,255,255,0.98)",
   borderRadius: 10,
   color: "#222",
+  height: "100vh",
+  display: "flex",
+  flexDirection: "column",
+  overflow: "hidden",
+  boxSizing: "border-box",
+  position: "relative",
 };
 const headerStyle: React.CSSProperties = {
   display: "flex",
   justifyContent: "space-between",
   alignItems: "center",
   fontWeight: 600,
-  marginBottom: 8,
   color: "#666",
   fontSize: 12,
   gap: 8,
+  padding: "10px 12px 8px",
+  background: "rgba(255,255,255,0.98)",
+  borderBottom: "1px solid rgba(0,0,0,0.06)",
+  flexShrink: 0,
+  position: "relative",
+  zIndex: 2,
+};
+const contentStyle: React.CSSProperties = {
+  flex: 1,
+  overflowY: "auto",
+  padding: "12px 14px 18px",
+  minHeight: 0,
 };
 const dragHandleStyle: React.CSSProperties = {
   flex: 1,
@@ -302,10 +640,35 @@ const actionsStyle: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
   gap: 4,
+  flexShrink: 0,
 };
 const originalStyle: React.CSSProperties = { color: "#888", fontSize: 12, marginBottom: 6 };
 const translatedStyle: React.CSSProperties = { lineHeight: 1.5 };
-const metaStyle: React.CSSProperties = { color: "#aaa", fontSize: 11, marginTop: 8 };
+const metaStyle: React.CSSProperties = { color: "#aaa", fontSize: 11, marginTop: 10 };
+const timingBreakStyle: React.CSSProperties = { color: "#bbb" };
+const phaseTimingStyle: React.CSSProperties = {
+  color: "#999",
+  fontSize: 11,
+  marginTop: 4,
+};
+const toastStyle: React.CSSProperties = {
+  position: "fixed",
+  bottom: 12,
+  left: "50%",
+  transform: "translateX(-50%)",
+  background: "rgba(0,0,0,0.78)",
+  color: "#fff",
+  padding: "4px 12px",
+  borderRadius: 5,
+  fontSize: 12,
+  pointerEvents: "none",
+};
+const shortcutHintStyle: React.CSSProperties = {
+  marginTop: 6,
+  fontSize: 10,
+  color: "#bbb",
+  lineHeight: 1.5,
+};
 const errorStyle: React.CSSProperties = { color: "#c0392b", lineHeight: 1.5 };
 const loadingStyle: React.CSSProperties = { color: "#666" };
 const idleStyle: React.CSSProperties = { color: "#aaa", fontSize: 12 };
@@ -323,6 +686,13 @@ const iconBtnStyle: React.CSSProperties = {
   width: 24,
   padding: "2px 0",
 };
+/** 固定等激活状态的图标按钮。 */
+const activeIconBtnStyle: React.CSSProperties = {
+  ...iconBtnStyle,
+  background: "#dbeafe",
+  borderColor: "#2563eb",
+  color: "#2563eb",
+};
 const openSettingsBtnStyle: React.CSSProperties = {
   padding: "5px 14px",
   border: "none",
@@ -331,4 +701,15 @@ const openSettingsBtnStyle: React.CSSProperties = {
   borderRadius: 4,
   fontSize: 13,
   cursor: "pointer",
+};
+const resizeHandleStyle: React.CSSProperties = {
+  position: "fixed",
+  right: 0,
+  bottom: 0,
+  width: 18,
+  height: 18,
+  cursor: "nwse-resize",
+  zIndex: 5,
+  background:
+    "linear-gradient(135deg, transparent 0 45%, rgba(0,0,0,0.22) 46% 52%, transparent 53% 62%, rgba(0,0,0,0.22) 63% 69%, transparent 70%)",
 };

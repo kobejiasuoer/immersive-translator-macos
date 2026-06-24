@@ -15,3 +15,15 @@ npm-debug.log*
 .idea/
 *.swp
 .DS_Store
+
+# OCR 模型（首次使用时下载到 app_data_dir，不进仓库）
+src-tauri/models/*.onnx
+test_ocr.png
+
+# 更新签名密钥（绝不入仓库）
+*-updater-keys*
+*.sig
+
+# 发布产物（构建后生成，通过 GitHub Release 分发，不入仓库）
+release-v*/
+
